@@ -1,0 +1,1464 @@
+--========================================================
+-- HD ADMIN v2.5.0
+-- by Voltex Studios
+-- Interface inspired by the supplied reference image
+-- Client-side utilities for your own character only.
+--========================================================
+
+local Players = game:GetService("Players")
+local UIS = game:GetService("UserInputService")
+local RunService = game:GetService("RunService")
+local TweenService = game:GetService("TweenService")
+local Lighting = game:GetService("Lighting")
+local TeleportService = game:GetService("TeleportService")
+local LP = Players.LocalPlayer
+
+-- Remove an older copy
+pcall(function()
+    local old = (gethui and gethui()) or game:GetService("CoreGui")
+    local found = old:FindFirstChild("HD_ADMIN")
+    if found then found:Destroy() end
+end)
+
+local GUI = Instance.new("ScreenGui")
+GUI.Name = "HD_ADMIN"
+GUI.ResetOnSpawn = false
+GUI.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
+
+local parentOK = pcall(function()
+    GUI.Parent = (gethui and gethui()) or game:GetService("CoreGui")
+end)
+if not parentOK or not GUI.Parent then
+    GUI.Parent = LP:WaitForChild("PlayerGui")
+end
+
+local Settings = {
+    Theme = "Dark",
+    BackgroundTransparency = 0,
+    Rounded = true,
+    Scale = 1,
+    Animations = true,
+    Notifications = true,
+    CompactMode = false,
+    ToggleKey = Enum.KeyCode.RightControl,
+    Accent = Color3.fromRGB(245,245,245),
+    Background = Color3.fromRGB(10,10,11),
+    Panel = Color3.fromRGB(24,24,26),
+    Tile = Color3.fromRGB(37,37,40),
+    Text = Color3.fromRGB(248,248,248),
+    Muted = Color3.fromRGB(155,155,160)
+}
+
+local function create(class, parent, props)
+    local obj = Instance.new(class)
+    for k,v in pairs(props or {}) do
+        obj[k] = v
+    end
+    obj.Parent = parent
+    return obj
+end
+
+local function corner(obj, radius)
+    return create("UICorner", obj, {
+        CornerRadius = UDim.new(0, Settings.Rounded and radius or 2)
+    })
+end
+
+local function outline(obj, color)
+    return create("UIStroke", obj, {
+        Color = color or Color3.fromRGB(58,58,62),
+        Thickness = 1,
+        Transparency = 0.12
+    })
+end
+
+local function tween(obj, props, duration)
+    if Settings.Animations then
+        TweenService:Create(obj, TweenInfo.new(duration or 0.15, Enum.EasingStyle.Quad, Enum.EasingDirection.Out), props):Play()
+    else
+        for k,v in pairs(props) do obj[k] = v end
+    end
+end
+
+local function label(parent, text, size, pos, color, bold)
+    return create("TextLabel", parent, {
+        BackgroundTransparency = 1,
+        Text = text,
+        TextColor3 = color or Settings.Text,
+        TextSize = size,
+        Position = pos,
+        Font = bold and Enum.Font.GothamBold or Enum.Font.GothamMedium,
+        TextXAlignment = Enum.TextXAlignment.Left,
+        TextYAlignment = Enum.TextYAlignment.Center
+    })
+end
+
+local logs = {}
+-- This records when the script first observed each player, NOT their true server join time.
+local observedAt = {}
+for _, player in ipairs(Players:GetPlayers()) do observedAt[player] = os.clock() end
+Players.PlayerAdded:Connect(function(player) observedAt[player] = os.clock() end)
+Players.PlayerRemoving:Connect(function(player) observedAt[player] = nil end)
+
+local notification
+local function log(message)
+    table.insert(logs, 1, os.date("%H:%M:%S") .. "  •  " .. tostring(message))
+    while #logs > 50 do table.remove(logs) end
+end
+
+local function notify(message)
+    log(message)
+    if not Settings.Notifications then return end
+    if notification then notification:Destroy() end
+    notification = create("Frame", GUI, {
+        Size = UDim2.fromOffset(245, 52),
+        Position = UDim2.new(1,-260,1,-68),
+        BackgroundColor3 = Settings.Panel,
+        BackgroundTransparency = Settings.BackgroundTransparency,
+        BorderSizePixel = 0,
+        ZIndex = 20
+    })
+    corner(notification, 9)
+    outline(notification)
+    label(notification, "HD ADMIN", 11, UDim2.fromOffset(12,5), Settings.Muted, true).Size = UDim2.new(1,-20,0,16)
+    local msg = label(notification, tostring(message), 12, UDim2.fromOffset(12,23), Settings.Text, false)
+    msg.Size = UDim2.new(1,-20,0,22)
+    msg.TextTruncate = Enum.TextTruncate.AtEnd
+    task.delay(2.8, function()
+        if notification then notification:Destroy(); notification = nil end
+    end)
+end
+
+-- Character helpers
+local function character() return LP.Character end
+local function humanoid()
+    local c = character()
+    return c and c:FindFirstChildOfClass("Humanoid")
+end
+local function root()
+    local c = character()
+    return c and c:FindFirstChild("HumanoidRootPart")
+end
+local function head()
+    local c = character()
+    return c and c:FindFirstChild("Head")
+end
+
+local original = {}
+local function saveCharacter()
+    table.clear(original)
+    local c = character()
+    if not c then return end
+    for _,obj in ipairs(c:GetDescendants()) do
+        if obj:IsA("BasePart") then
+            original[obj] = {
+                Size = obj.Size,
+                Material = obj.Material,
+                Color = obj.Color,
+                Transparency = obj.Transparency,
+                LocalTransparencyModifier = obj.LocalTransparencyModifier,
+                CanCollide = obj.CanCollide
+            }
+        end
+    end
+end
+if character() then saveCharacter() end
+LP.CharacterAdded:Connect(function()
+    task.wait(1)
+    saveCharacter()
+end)
+
+local states = {Fly=false, NoClip=false, InfiniteJump=false}
+local connections = {}
+local flyObjects = {}
+
+local function stopConnection(name)
+    if connections[name] then
+        connections[name]:Disconnect()
+        connections[name] = nil
+    end
+end
+
+local function fly(speed)
+    states.Fly = not states.Fly
+    stopConnection("Fly")
+    for _,obj in ipairs(flyObjects) do pcall(function() obj:Destroy() end) end
+    table.clear(flyObjects)
+    if not states.Fly then notify("Fly desativado"); return end
+
+    local r = root()
+    if not r then states.Fly=false; notify("Personagem não encontrado"); return end
+
+    local velocity = Instance.new("BodyVelocity")
+    velocity.MaxForce = Vector3.new(1e6,1e6,1e6)
+    velocity.Velocity = Vector3.zero
+    velocity.Parent = r
+    local gyro = Instance.new("BodyGyro")
+    gyro.MaxTorque = Vector3.new(1e6,1e6,1e6)
+    gyro.P = 10000
+    gyro.CFrame = workspace.CurrentCamera.CFrame
+    gyro.Parent = r
+    flyObjects = {velocity,gyro}
+
+    connections.Fly = RunService.RenderStepped:Connect(function()
+        if not states.Fly or not r.Parent then return end
+        local camera = workspace.CurrentCamera
+        local direction = Vector3.zero
+        if UIS:IsKeyDown(Enum.KeyCode.W) then direction += camera.CFrame.LookVector end
+        if UIS:IsKeyDown(Enum.KeyCode.S) then direction -= camera.CFrame.LookVector end
+        if UIS:IsKeyDown(Enum.KeyCode.A) then direction -= camera.CFrame.RightVector end
+        if UIS:IsKeyDown(Enum.KeyCode.D) then direction += camera.CFrame.RightVector end
+        if UIS:IsKeyDown(Enum.KeyCode.Space) then direction += Vector3.yAxis end
+        if UIS:IsKeyDown(Enum.KeyCode.LeftControl) then direction -= Vector3.yAxis end
+        velocity.Velocity = direction * (speed or 60)
+        gyro.CFrame = camera.CFrame
+    end)
+    notify("Fly ativado — WASD / Espaço / Ctrl")
+end
+
+local function noclip()
+    states.NoClip = not states.NoClip
+    stopConnection("NoClip")
+    if states.NoClip then
+        connections.NoClip = RunService.Stepped:Connect(function()
+            local c = character()
+            if c then
+                for _,obj in ipairs(c:GetDescendants()) do
+                    if obj:IsA("BasePart") then obj.CanCollide = false end
+                end
+            end
+        end)
+        notify("NoClip ativado")
+    else
+        for obj,data in pairs(original) do
+            if obj.Parent then obj.CanCollide = data.CanCollide end
+        end
+        notify("NoClip desativado")
+    end
+end
+
+local function infiniteJump()
+    states.InfiniteJump = not states.InfiniteJump
+    stopConnection("InfiniteJump")
+    if states.InfiniteJump then
+        connections.InfiniteJump = UIS.JumpRequest:Connect(function()
+            local h = humanoid()
+            if h then h:ChangeState(Enum.HumanoidStateType.Jumping) end
+        end)
+        notify("Infinite Jump ativado")
+    else
+        notify("Infinite Jump desativado")
+    end
+end
+
+local function applyMaterial(material)
+    local c = character()
+    if not c then return end
+    for _,obj in ipairs(c:GetDescendants()) do
+        if obj:IsA("BasePart") then obj.Material = material end
+    end
+    notify(material.Name .. " aplicado")
+end
+
+local function headSize(value)
+    local h = head()
+    if not h then return end
+    local data = original[h]
+    h.Size = (data and data.Size or h.Size) * math.clamp(value,0.5,5)
+    notify("HeadSize: " .. tostring(value))
+end
+
+local function bodySize(value)
+    local h = humanoid()
+    if not h then return end
+    value = math.clamp(value,0.5,3)
+    for _,name in ipairs({"BodyWidthScale","BodyHeightScale","BodyDepthScale","HeadScale"}) do
+        local scale = h:FindFirstChild(name)
+        if scale and scale:IsA("NumberValue") then scale.Value = value end
+    end
+    notify("Size: " .. tostring(value))
+end
+
+local function setTitle(text)
+    local h = head()
+    if not h then return end
+    local old = h:FindFirstChild("HDAdminTitle")
+    if old then old:Destroy() end
+    local billboard = create("BillboardGui", h, {
+        Name = "HDAdminTitle",
+        Size = UDim2.fromOffset(220,45),
+        StudsOffset = Vector3.new(0,2.7,0),
+        AlwaysOnTop = true
+    })
+    create("TextLabel", billboard, {
+        Size = UDim2.fromScale(1,1),
+        BackgroundTransparency = 1,
+        Text = tostring(text),
+        TextColor3 = Settings.Accent,
+        TextStrokeTransparency = 0,
+        Font = Enum.Font.GothamBold,
+        TextSize = 18
+    })
+    notify("Título local aplicado")
+end
+
+local function setSpeed(value)
+    local h = humanoid()
+    if h then h.WalkSpeed = math.clamp(value,0,200); notify("Speed: "..value) end
+end
+local function setJump(value)
+    local h = humanoid()
+    if h then h.UseJumpPower=true; h.JumpPower=math.clamp(value,0,200); notify("Jump: "..value) end
+end
+local function heal()
+    local h = humanoid()
+    if h then h.Health=h.MaxHealth; notify("Vida restaurada") end
+end
+local function god()
+    local h = humanoid()
+    if h then h.MaxHealth=100000; h.Health=h.MaxHealth; notify("Vida local alterada") end
+end
+local function invisible()
+    local c = character()
+    if not c then return end
+    for _,obj in ipairs(c:GetDescendants()) do
+        if obj:IsA("BasePart") then obj.LocalTransparencyModifier=1 end
+    end
+    notify("Invisibilidade local ativada")
+end
+
+-- LOCAL VEHICLE UTILITIES (only while seated in a vehicle)
+local vehicleState = {Fly=false}
+local vehicleObjects = {}
+local function getVehicle()
+    local h = humanoid()
+    if not h then return nil end
+    local seat = h.SeatPart
+    if not seat then return nil end
+    local model = seat:FindFirstAncestorOfClass("Model")
+    return model, seat
+end
+
+local function vehicleSpeed(value)
+    local model, seat = getVehicle()
+    if not model or not seat then notify("Entre em um veículo primeiro"); return end
+    local rootPart = model.PrimaryPart or seat
+    local direction = rootPart.CFrame.LookVector
+    local currentY = rootPart.AssemblyLinearVelocity.Y
+    rootPart.AssemblyLinearVelocity = direction * math.clamp(value,0,250) + Vector3.new(0,currentY,0)
+    notify("Velocidade local do veículo: "..tostring(value))
+end
+
+local function vehicleFly()
+    vehicleState.Fly = not vehicleState.Fly
+    stopConnection("VehicleFly")
+    for _,obj in ipairs(vehicleObjects) do pcall(function() obj:Destroy() end) end
+    table.clear(vehicleObjects)
+    if not vehicleState.Fly then notify("VehicleFly desativado"); return end
+    local model, seat = getVehicle()
+    if not model or not seat then vehicleState.Fly=false; notify("Entre em um veículo primeiro"); return end
+    local rootPart = model.PrimaryPart or seat
+    local velocity = Instance.new("BodyVelocity")
+    velocity.MaxForce = Vector3.new(1e6,1e6,1e6)
+    velocity.Velocity = Vector3.zero
+    velocity.Parent = rootPart
+    local gyro = Instance.new("BodyGyro")
+    gyro.MaxTorque = Vector3.new(1e6,1e6,1e6)
+    gyro.P = 9000
+    gyro.CFrame = rootPart.CFrame
+    gyro.Parent = rootPart
+    vehicleObjects = {velocity,gyro}
+    connections.VehicleFly = RunService.RenderStepped:Connect(function()
+        if not vehicleState.Fly or not rootPart.Parent then return end
+        local camera = workspace.CurrentCamera
+        local direction = Vector3.zero
+        if UIS:IsKeyDown(Enum.KeyCode.W) then direction += camera.CFrame.LookVector end
+        if UIS:IsKeyDown(Enum.KeyCode.S) then direction -= camera.CFrame.LookVector end
+        if UIS:IsKeyDown(Enum.KeyCode.A) then direction -= camera.CFrame.RightVector end
+        if UIS:IsKeyDown(Enum.KeyCode.D) then direction += camera.CFrame.RightVector end
+        if UIS:IsKeyDown(Enum.KeyCode.Space) then direction += Vector3.yAxis end
+        if UIS:IsKeyDown(Enum.KeyCode.LeftControl) then direction -= Vector3.yAxis end
+        velocity.Velocity = direction * 65
+        gyro.CFrame = camera.CFrame
+    end)
+    notify("VehicleFly ativado — WASD / Espaço / Ctrl")
+end
+
+local spectating = false
+local previousCameraSubject
+local function findPlayer(query)
+    query = tostring(query or ""):lower()
+    if query == "" then return nil end
+    if query == "me" then return LP end
+    if query == "random" then
+        local candidates={}
+        for _,plr in ipairs(Players:GetPlayers()) do if plr ~= LP then table.insert(candidates,plr) end end
+        return #candidates>0 and candidates[math.random(1,#candidates)] or LP
+    end
+    if query == "nearest" or query == "farthest" then
+        local myRoot=root()
+        if not myRoot then return nil end
+        local chosen,best=nil,(query=="nearest" and math.huge or -math.huge)
+        for _,plr in ipairs(Players:GetPlayers()) do
+            local otherRoot=plr.Character and plr.Character:FindFirstChild("HumanoidRootPart")
+            if plr ~= LP and otherRoot then
+                local distance=(otherRoot.Position-myRoot.Position).Magnitude
+                if (query=="nearest" and distance<best) or (query=="farthest" and distance>best) then
+                    chosen,best=plr,distance
+                end
+            end
+        end
+        return chosen
+    end
+    for _,plr in ipairs(Players:GetPlayers()) do
+        if plr.Name:lower() == query or plr.DisplayName:lower() == query then return plr end
+    end
+    for _,plr in ipairs(Players:GetPlayers()) do
+        if plr.Name:lower():sub(1,#query) == query or plr.DisplayName:lower():sub(1,#query) == query then return plr end
+    end
+    return nil
+end
+
+local function teleportToPlayer(query)
+    local target = findPlayer(query)
+    local myRoot = root()
+    local targetRoot = target and target.Character and target.Character:FindFirstChild("HumanoidRootPart")
+    if not target or not targetRoot or not myRoot then notify("Jogador ou personagem não encontrado"); return end
+    if target == LP then notify("Você já está nesse local"); return end
+    myRoot.CFrame = targetRoot.CFrame * CFrame.new(3,0,0)
+    notify("Teleporte local até "..target.Name)
+end
+
+local function viewPlayer(query)
+    local target = findPlayer(query)
+    local targetHumanoid = target and target.Character and target.Character:FindFirstChildOfClass("Humanoid")
+    if not targetHumanoid then notify("Jogador ou personagem não encontrado"); return end
+    local camera = workspace.CurrentCamera
+    if not spectating then previousCameraSubject = camera.CameraSubject end
+    spectating = true
+    camera.CameraSubject = targetHumanoid
+    notify("Visualizando "..target.Name.." — use ;unview")
+end
+
+local function unview()
+    local camera = workspace.CurrentCamera
+    camera.CameraSubject = humanoid() or previousCameraSubject
+    previousCameraSubject = nil
+    spectating = false
+    notify("Câmera restaurada")
+end
+
+local function equipOwnedBoombox()
+    local backpack = LP:FindFirstChildOfClass("Backpack")
+    local c = character()
+    local tool
+    for _,container in ipairs({backpack,c}) do
+        if container then
+            for _,obj in ipairs(container:GetChildren()) do
+                if obj:IsA("Tool") and obj.Name:lower():find("boombox",1,true) then tool=obj; break end
+            end
+        end
+        if tool then break end
+    end
+    if not tool then notify("Nenhuma Boombox encontrada no seu inventário"); return end
+    local h=humanoid()
+    if h then h:EquipTool(tool); notify("Boombox equipada") end
+end
+
+local function restore()
+    states.Fly=false; states.NoClip=false; states.InfiniteJump=false; vehicleState.Fly=false
+    if clickTeleportConnection then clickTeleportConnection:Disconnect(); clickTeleportConnection=nil end
+    unview()
+    for _,obj in ipairs(vehicleObjects) do pcall(function() obj:Destroy() end) end
+    table.clear(vehicleObjects)
+    for name in pairs(connections) do stopConnection(name) end
+    for _,obj in ipairs(flyObjects) do pcall(function() obj:Destroy() end) end
+    table.clear(flyObjects)
+    local h = humanoid()
+    if h then
+        h.WalkSpeed=16
+        h.UseJumpPower=true
+        h.JumpPower=50
+        h.MaxHealth=100
+        h.Health=100
+    end
+    for obj,data in pairs(original) do
+        if obj and obj.Parent then
+            obj.Size=data.Size
+            obj.Material=data.Material
+            obj.Color=data.Color
+            obj.Transparency=data.Transparency
+            obj.LocalTransparencyModifier=data.LocalTransparencyModifier
+            obj.CanCollide=data.CanCollide
+        end
+    end
+    local hd=head()
+    if hd then
+        local titleObj=hd:FindFirstChild("HDAdminTitle")
+        if titleObj then titleObj:Destroy() end
+    end
+    notify("Configurações originais restauradas")
+end
+
+
+-- Additional self-only movement, visual, camera and utility features.
+local savedSpawn = nil
+local clickTeleportConnection = nil
+local espObjects = {}
+local xrayOriginal = {}
+local xrayEnabled = false
+local lightingOriginal = nil
+local swimEnabled = false
+
+local function unfly()
+    if states.Fly then
+        states.Fly = false
+        stopConnection("Fly")
+        for _,obj in ipairs(flyObjects) do pcall(function() obj:Destroy() end) end
+        table.clear(flyObjects)
+    end
+    notify("Fly desativado")
+end
+
+local function clip()
+    if states.NoClip then
+        states.NoClip = false
+        stopConnection("NoClip")
+        for obj,data in pairs(original) do
+            if obj and obj.Parent then obj.CanCollide = data.CanCollide end
+        end
+        notify("Clip ativado")
+    else
+        notify("NoClip já está desativado")
+    end
+end
+
+local function setSwim()
+    swimEnabled = not swimEnabled
+    local h = humanoid()
+    if h then
+        if swimEnabled then
+            h:ChangeState(Enum.HumanoidStateType.Swimming)
+            notify("Estado Swimming solicitado")
+        else
+            h:ChangeState(Enum.HumanoidStateType.GettingUp)
+            notify("Swimming desativado")
+        end
+    end
+end
+
+local function clickTeleport()
+    if clickTeleportConnection then
+        clickTeleportConnection:Disconnect()
+        clickTeleportConnection = nil
+        notify("ClickTP desativado")
+        return
+    end
+    local mouse = LP:GetMouse()
+    clickTeleportConnection = mouse.Button1Down:Connect(function()
+        if UIS:GetFocusedTextBox() then return end
+        local hit = mouse.Hit
+        local r = root()
+        if hit and r then
+            r.CFrame = CFrame.new(hit.Position + Vector3.new(0,4,0))
+            notify("ClickTP: teleporte local realizado")
+        end
+    end)
+    notify("ClickTP ativado — clique no destino")
+end
+
+local function setSpawn()
+    local r = root()
+    if not r then notify("Personagem não encontrado"); return end
+    savedSpawn = r.CFrame
+    notify("Ponto de retorno salvo")
+end
+
+local function goSpawn()
+    local r = root()
+    if not r or not savedSpawn then notify("Use ;setspawn primeiro"); return end
+    r.CFrame = savedSpawn
+    notify("Retornou ao ponto salvo")
+end
+
+local function setESP(enabled)
+    if enabled then
+        for _,plr in ipairs(Players:GetPlayers()) do
+            if plr ~= LP and plr.Character and not espObjects[plr] then
+                local h = Instance.new("Highlight")
+                h.Name = "HD_LocalESP"
+                h.FillColor = Settings.Accent
+                h.OutlineColor = Color3.fromRGB(255,255,255)
+                h.FillTransparency = 0.75
+                h.DepthMode = Enum.HighlightDepthMode.AlwaysOnTop
+                h.Adornee = plr.Character
+                h.Parent = plr.Character
+                espObjects[plr] = h
+            end
+        end
+        notify("ESP local ativado")
+    else
+        for plr,h in pairs(espObjects) do pcall(function() h:Destroy() end) end
+        table.clear(espObjects)
+        notify("ESP local desativado")
+    end
+end
+
+local function setXray(enabled)
+    if enabled then
+        if xrayEnabled then notify("XRay já está ativado"); return end
+        xrayEnabled = true
+        table.clear(xrayOriginal)
+        for _,obj in ipairs(workspace:GetDescendants()) do
+            if obj:IsA("BasePart") and not (character() and obj:IsDescendantOf(character())) then
+                xrayOriginal[obj] = obj.LocalTransparencyModifier
+                obj.LocalTransparencyModifier = math.max(obj.LocalTransparencyModifier, 0.65)
+            end
+        end
+        notify("XRay visual local ativado")
+    else
+        for obj,value in pairs(xrayOriginal) do
+            if obj and obj.Parent then obj.LocalTransparencyModifier = value end
+        end
+        table.clear(xrayOriginal)
+        xrayEnabled = false
+        notify("XRay desativado")
+    end
+end
+
+local function setFullbright(enabled)
+    if enabled then
+        if not lightingOriginal then
+            lightingOriginal = {
+                Brightness = Lighting.Brightness,
+                ClockTime = Lighting.ClockTime,
+                GlobalShadows = Lighting.GlobalShadows,
+                Ambient = Lighting.Ambient,
+                OutdoorAmbient = Lighting.OutdoorAmbient
+            }
+        end
+        Lighting.Brightness = 3
+        Lighting.ClockTime = 14
+        Lighting.GlobalShadows = false
+        Lighting.Ambient = Color3.fromRGB(180,180,180)
+        Lighting.OutdoorAmbient = Color3.fromRGB(180,180,180)
+        notify("Fullbright local ativado")
+    elseif lightingOriginal then
+        for property,value in pairs(lightingOriginal) do Lighting[property] = value end
+        lightingOriginal = nil
+        notify("Iluminação original restaurada")
+    end
+end
+
+local freecamState = {Enabled=false, Position=nil, Yaw=0, Pitch=0, OldType=nil, OldSubject=nil, OldMouseBehavior=nil}
+local function freecam()
+    local camera = workspace.CurrentCamera
+    if not camera then return end
+    if freecamState.Enabled then
+        freecamState.Enabled=false
+        stopConnection("Freecam")
+        camera.CameraType=freecamState.OldType or Enum.CameraType.Custom
+        camera.CameraSubject=freecamState.OldSubject or humanoid()
+        UIS.MouseBehavior=freecamState.OldMouseBehavior or Enum.MouseBehavior.Default
+        notify("Freecam desativado")
+        return
+    end
+    freecamState.Enabled=true
+    freecamState.Position=camera.CFrame.Position
+    local look=camera.CFrame.LookVector
+    freecamState.Yaw=math.atan2(-look.X,-look.Z)
+    freecamState.Pitch=math.asin(math.clamp(look.Y,-1,1))
+    freecamState.OldType=camera.CameraType
+    freecamState.OldSubject=camera.CameraSubject
+    freecamState.OldMouseBehavior=UIS.MouseBehavior
+    camera.CameraType=Enum.CameraType.Scriptable
+    UIS.MouseBehavior=Enum.MouseBehavior.LockCenter
+    connections.Freecam=RunService.RenderStepped:Connect(function(dt)
+        if not freecamState.Enabled then return end
+        local delta=UIS:GetMouseDelta()
+        freecamState.Yaw=freecamState.Yaw-delta.X*0.0025
+        freecamState.Pitch=math.clamp(freecamState.Pitch-delta.Y*0.0025,-1.45,1.45)
+        local rotation=CFrame.fromOrientation(freecamState.Pitch,freecamState.Yaw,0)
+        local move=Vector3.zero
+        if UIS:IsKeyDown(Enum.KeyCode.W) then move+=rotation.LookVector end
+        if UIS:IsKeyDown(Enum.KeyCode.S) then move-=rotation.LookVector end
+        if UIS:IsKeyDown(Enum.KeyCode.D) then move+=rotation.RightVector end
+        if UIS:IsKeyDown(Enum.KeyCode.A) then move-=rotation.RightVector end
+        if UIS:IsKeyDown(Enum.KeyCode.E) then move+=Vector3.yAxis end
+        if UIS:IsKeyDown(Enum.KeyCode.Q) then move-=Vector3.yAxis end
+        freecamState.Position+=move*(45*dt)
+        camera.CFrame=CFrame.new(freecamState.Position)*rotation
+    end)
+    notify("Freecam ativado — WASD / Q / E; mouse para olhar")
+end
+
+local function setFOV(value)
+    local camera = workspace.CurrentCamera
+    if not camera then return end
+    camera.FieldOfView = math.clamp(tonumber(value) or 70, 40, 120)
+    notify("FOV: "..tostring(camera.FieldOfView))
+end
+
+local function visible()
+    local c = character()
+    if not c then return end
+    for _,obj in ipairs(c:GetDescendants()) do
+        if obj:IsA("BasePart") then obj.LocalTransparencyModifier = 0 end
+    end
+    notify("Visibilidade local restaurada")
+end
+
+local function sit()
+    local h = humanoid()
+    if h then h.Sit = true; notify("Sentar") end
+end
+
+local function stand()
+    local h = humanoid()
+    if h then h.Sit = false; h:ChangeState(Enum.HumanoidStateType.GettingUp); notify("Levantar") end
+end
+
+local function rejoin()
+    local ok,err = pcall(function() TeleportService:Teleport(game.PlaceId, LP) end)
+    if not ok then notify("Não foi possível reconectar: "..tostring(err)) end
+end
+
+local function getNumericArgument(args, defaultValue)
+    local candidate = args[2]
+    if candidate and (candidate:lower() == "me" or candidate:lower() == LP.Name:lower()) then
+        candidate = args[3]
+    end
+    return tonumber(candidate) or defaultValue
+end
+
+local commands = {
+    fly=function() if not states.Fly then fly(60) else notify("Fly já está ativo") end end,
+    fly2=function() if not states.Fly then fly(100) else notify("Fly já está ativo") end end,
+    unfly=unfly,
+    noclip=noclip,
+    clip=clip,
+    infjump=infiniteJump,
+    infinitejump=infiniteJump,
+    neon=function() applyMaterial(Enum.Material.Neon) end,
+    glass=function() applyMaterial(Enum.Material.Glass) end,
+    heal=heal,
+    god=god,
+    ungod=function()
+        local h=humanoid()
+        if h then h.MaxHealth=100; h.Health=math.min(h.Health,100); notify("God local desativado") end
+    end,
+    invisible=invisible,
+    visible=visible,
+    restore=restore,
+    reset=function() if character() then character():BreakJoints() end end,
+    speed=function(a) setSpeed(getNumericArgument(a,50)) end,
+    ws=function(a) setSpeed(getNumericArgument(a,50)) end,
+    jump=function(a) setJump(getNumericArgument(a,100)) end,
+    jumppower=function(a) setJump(getNumericArgument(a,100)) end,
+    jp=function(a) setJump(getNumericArgument(a,100)) end,
+    headsize=function(a) headSize(getNumericArgument(a,2)) end,
+    size=function(a) bodySize(getNumericArgument(a,2)) end,
+    title=function(a)
+        local text = table.concat(a," ", (a[2] and a[2]:lower()=="me") and 3 or 2)
+        setTitle(text ~= "" and text or "ADMIN")
+    end,
+    vehiclefly=vehicleFly,
+    vehiclespeed=function(a) vehicleSpeed(getNumericArgument(a,100)) end,
+    boombox=equipOwnedBoombox,
+    goto=function(a) teleportToPlayer(a[2] and a[2]:lower()=="me" and a[3] or a[2]) end,
+    tp=function(a)
+        local first,second=a[2],a[3]
+        if first and (first:lower()=="me" or first:lower()==LP.Name:lower()) then
+            teleportToPlayer(second)
+        else
+            notify("Por segurança, use ;tp me NomeDoJogador")
+        end
+    end,
+    view=function(a) viewPlayer(a[2] and a[2]:lower()=="me" and a[3] or a[2]) end,
+    unview=unview,
+    clicktp=clickTeleport,
+    tptool=clickTeleport,
+    setspawn=setSpawn,
+    spawnpoint=goSpawn,
+    esp=function() setESP(true) end,
+    unesp=function() setESP(false) end,
+    xray=function() setXray(true) end,
+    unxray=function() setXray(false) end,
+    fullbright=function() setFullbright(true) end,
+    unfullbright=function() setFullbright(false) end,
+    fov=function(a) setFOV(getNumericArgument(a,70)) end,
+    freecam=freecam,
+    swim=setSwim,
+    sit=sit,
+    stand=stand,
+    rejoin=rejoin,
+    rj=rejoin
+}
+
+local function executeChat(message)
+    if message:sub(1,1) ~= ";" then return end
+    local chunks = string.split(message, "\\")
+    for _,chunk in ipairs(chunks) do
+        chunk = chunk:match("^%s*(.-)%s*$") or chunk
+        local args = string.split(chunk, " ")
+        local command = (args[1] or ""):sub(2):lower()
+        if command ~= "" then
+            if command == "cmds" or command == "help" then
+                notify("Comandos locais: fly/unfly, noclip/clip, ws, jp, goto, view, clicktp, esp, xray, fullbright, fov, freecam, swim, sit, stand, setspawn, spawnpoint, rejoin")
+            else
+                local fn = commands[command]
+                if fn then
+                    local ok,err = pcall(function() fn(args) end)
+                    if not ok then notify("Erro: "..tostring(err)) end
+                else
+                    notify("Comando indisponível: "..command)
+                end
+            end
+        end
+    end
+end
+LP.Chatted:Connect(executeChat)
+
+-- Main window: proportions and layout follow the reference image
+local main = create("Frame", GUI, {
+    Name="MainWindow",
+    Size=UDim2.fromOffset(320,480),
+    Position=UDim2.new(0.5,-160,0.5,-240),
+    BackgroundColor3=Settings.Background,
+    BackgroundTransparency=Settings.BackgroundTransparency,
+    BorderSizePixel=0,
+    Visible=false,
+    ClipsDescendants=true
+})
+corner(main,14)
+outline(main,Color3.fromRGB(65,65,70))
+
+local top = create("Frame", main, {
+    Name="TopBar",
+    Size=UDim2.new(1,0,0,64),
+    BackgroundColor3=Color3.fromRGB(0,0,0),
+    BorderSizePixel=0,
+    Active=true
+})
+corner(top,13)
+
+local version = label(top,"v2.5.0",9,UDim2.fromOffset(9,5),Settings.Muted,true)
+version.Rotation=-45
+version.Size=UDim2.fromOffset(42,14)
+
+local logo = create("TextLabel",top,{
+    Size=UDim2.fromOffset(24,24),
+    Position=UDim2.new(0.5,-66,0,14),
+    BackgroundColor3=Color3.fromRGB(248,248,248),
+    Text="HD",
+    TextColor3=Color3.fromRGB(8,8,8),
+    TextSize=11,
+    Font=Enum.Font.GothamBlack
+})
+corner(logo,5)
+local menuTitle = label(top,"Menu",17,UDim2.new(0.5,-36,0,12),Settings.Text,true)
+menuTitle.Size=UDim2.fromOffset(75,28)
+
+local minimize = create("TextButton",top,{
+    Size=UDim2.fromOffset(28,34),
+    Position=UDim2.new(1,-76,0,13),
+    BackgroundTransparency=1,
+    Text="−",
+    TextColor3=Settings.Text,
+    TextSize=25,
+    Font=Enum.Font.Gotham
+})
+local close = create("TextButton",top,{
+    Size=UDim2.fromOffset(34,34),
+    Position=UDim2.new(1,-40,0,13),
+    BackgroundTransparency=1,
+    Text="×",
+    TextColor3=Settings.Text,
+    TextSize=27,
+    Font=Enum.Font.Gotham
+})
+
+local content = create("Frame",main,{
+    Name="Content",
+    Size=UDim2.new(1,0,1,-64),
+    Position=UDim2.fromOffset(0,64),
+    BackgroundTransparency=1
+})
+
+-- Drag with mouse or touch; header buttons remain usable
+local dragging=false
+local dragStart,startPosition,dragInput
+top.InputBegan:Connect(function(input)
+    if input.UserInputType==Enum.UserInputType.MouseButton1 or input.UserInputType==Enum.UserInputType.Touch then
+        local p=input.Position
+        local x0=main.AbsolutePosition.X
+        local right=main.AbsolutePosition.X+main.AbsoluteSize.X
+        if p.X < right-82 then
+            dragging=true
+            dragStart=p
+            startPosition=main.Position
+            input.Changed:Connect(function()
+                if input.UserInputState==Enum.UserInputState.End then dragging=false end
+            end)
+        end
+    end
+end)
+top.InputChanged:Connect(function(input)
+    if input.UserInputType==Enum.UserInputType.MouseMovement or input.UserInputType==Enum.UserInputType.Touch then
+        dragInput=input
+    end
+end)
+UIS.InputChanged:Connect(function(input)
+    if dragging and input==dragInput then
+        local delta=input.Position-dragStart
+        main.Position=UDim2.new(startPosition.X.Scale,startPosition.X.Offset+delta.X,startPosition.Y.Scale,startPosition.Y.Offset+delta.Y)
+    end
+end)
+
+local pages={}
+local function newPage(name)
+    local page=create("ScrollingFrame",content,{
+        Name=name,
+        Size=UDim2.new(1,-20,1,-18),
+        Position=UDim2.fromOffset(10,9),
+        BackgroundTransparency=1,
+        BorderSizePixel=0,
+        ScrollBarThickness=3,
+        ScrollBarImageColor3=Settings.Muted,
+        CanvasSize=UDim2.new(0,0,0,0),
+        Visible=false
+    })
+    local list=create("UIListLayout",page,{
+        Padding=UDim.new(0,6),
+        SortOrder=Enum.SortOrder.LayoutOrder
+    })
+    list:GetPropertyChangedSignal("AbsoluteContentSize"):Connect(function()
+        page.CanvasSize=UDim2.fromOffset(0,list.AbsoluteContentSize.Y+12)
+    end)
+    pages[name]=page
+    return page
+end
+
+local home=newPage("Home")
+local commandsPage=newPage("Commands")
+local analyticsPage=newPage("Analytics")
+local rolesPage=newPage("Roles")
+local moderationPage=newPage("Moderation")
+local tasksPage=newPage("Tasks")
+local logsPage=newPage("Logs")
+local settingsPage=newPage("Settings")
+local infoPage=newPage("Info")
+
+local function showPage(name)
+    if not pages[name] then return end
+    for n,p in pairs(pages) do p.Visible=(n==name) end
+    menuTitle.Text=(name=="Home" and "Menu" or name)
+end
+
+local function makeButton(parent,text,height,order)
+    local b=create("TextButton",parent,{
+        Size=UDim2.new(1,-4,0,height or 38),
+        BackgroundColor3=Settings.Tile,
+        BackgroundTransparency=Settings.BackgroundTransparency,
+        Text=text,
+        TextColor3=Settings.Text,
+        TextSize=13,
+        Font=Enum.Font.GothamMedium,
+        AutoButtonColor=false,
+        LayoutOrder=order or 1
+    })
+    corner(b,9); outline(b)
+    b.MouseEnter:Connect(function() tween(b,{BackgroundColor3=Color3.fromRGB(55,55,60)},0.1) end)
+    b.MouseLeave:Connect(function() tween(b,{BackgroundColor3=Settings.Tile},0.1) end)
+    return b
+end
+
+local function section(parent,text,order)
+    local t=label(parent,text,12,UDim2.new(),Settings.Muted,true)
+    t.Size=UDim2.new(1,-4,0,24)
+    t.LayoutOrder=order or 1
+    return t
+end
+
+local function action(parent,text,callback,order)
+    local b=makeButton(parent,text,38,order)
+    b.MouseButton1Click:Connect(callback)
+    return b
+end
+
+-- HOME: exact two-column card arrangement like the reference
+local tileHolder=create("Frame",home,{
+    Size=UDim2.new(1,0,0,410),
+    BackgroundTransparency=1,
+    LayoutOrder=1
+})
+local grid=create("UIGridLayout",tileHolder,{
+    CellSize=UDim2.new(0.5,-4,0,98),
+    CellPadding=UDim2.fromOffset(7,6),
+    SortOrder=Enum.SortOrder.LayoutOrder
+})
+local tileData={
+    {"💻","Commands","Commands"},
+    {"📊","Analytics","Analytics"},
+    {"🛡️","Roles","Roles"},
+    {"🔨","Moderation","Moderation"},
+    {"📋","Tasks","Tasks"},
+    {"📜","Logs","Logs"},
+    {"⚙️","Settings","Settings"},
+    {"ℹ️","Info","Info"}
+}
+for i,data in ipairs(tileData) do
+    local tile=create("TextButton",tileHolder,{
+        BackgroundColor3=Settings.Tile,
+        BackgroundTransparency=Settings.BackgroundTransparency,
+        Text="",
+        AutoButtonColor=false,
+        LayoutOrder=i
+    })
+    corner(tile,10); outline(tile)
+    local ico=label(tile,data[1],29,UDim2.new(0,0,0,13),Settings.Text,true)
+    ico.Size=UDim2.new(1,0,0,38)
+    ico.Font=Enum.Font.SourceSansBold
+    ico.TextXAlignment=Enum.TextXAlignment.Center
+    local txt=label(tile,data[2],14,UDim2.new(0,0,0,58),Settings.Text,false)
+    txt.Size=UDim2.new(1,0,0,24)
+    txt.TextXAlignment=Enum.TextXAlignment.Center
+    tile.MouseEnter:Connect(function() tween(tile,{BackgroundColor3=Color3.fromRGB(54,54,59)},0.1) end)
+    tile.MouseLeave:Connect(function() tween(tile,{BackgroundColor3=Settings.Tile},0.1) end)
+    tile.MouseButton1Click:Connect(function() showPage(data[3]) end)
+end
+
+-- All secondary pages have a back button
+for name,page in pairs(pages) do
+    if name~="Home" then
+        local back=makeButton(page,"‹   Back to menu",34,-10)
+        back.MouseButton1Click:Connect(function() showPage("Home") end)
+    end
+end
+
+-- COMMANDS
+section(commandsPage,"PLAYER COMMANDS",1)
+local search=create("TextBox",commandsPage,{
+    Size=UDim2.new(1,-4,0,36),
+    BackgroundColor3=Settings.Panel,
+    BackgroundTransparency=Settings.BackgroundTransparency,
+    TextColor3=Settings.Text,
+    PlaceholderColor3=Settings.Muted,
+    PlaceholderText="Search commands...",
+    Text="",
+    ClearTextOnFocus=false,
+    Font=Enum.Font.Gotham,
+    TextSize=12,
+    LayoutOrder=2
+})
+corner(search,8); outline(search)
+
+local commandNames={"Fly","Unfly","NoClip","Clip","InfiniteJump","Swim","Speed","WS","JumpPower","JP","Neon","Glass","HeadSize","Size","Title","Heal","God","Ungod","Invisible","Visible","Restore","Reset","VehicleFly","VehicleSpeed","Boombox","Goto","Teleport","View","Unview","ClickTP","TPTool","SetSpawn","SpawnPoint","ESP","UnESP","XRay","UnXRay","Fullbright","Unfullbright","FOV","Freecam","Sit","Stand","Rejoin"}
+local commandButtons={}
+
+-- Small argument popup shown when a command needs a player name or value.
+local promptPanel=create("Frame",main,{
+    Name="CommandPrompt",
+    Size=UDim2.fromOffset(286,116),
+    Position=UDim2.new(0.5,-143,1,-128),
+    BackgroundColor3=Settings.Panel,
+    BorderSizePixel=0,
+    Visible=false,
+    ZIndex=30
+})
+corner(promptPanel,10); outline(promptPanel,Color3.fromRGB(100,100,108))
+local promptTitle=create("TextLabel",promptPanel,{
+    Size=UDim2.new(1,-18,0,24),
+    Position=UDim2.fromOffset(10,6),
+    BackgroundTransparency=1,
+    Text="COMMAND",
+    TextColor3=Settings.Text,
+    Font=Enum.Font.GothamBold,
+    TextSize=12,
+    TextXAlignment=Enum.TextXAlignment.Left,
+    ZIndex=31
+})
+local promptInput=create("TextBox",promptPanel,{
+    Size=UDim2.new(1,-20,0,32),
+    Position=UDim2.fromOffset(10,34),
+    BackgroundColor3=Settings.Tile,
+    TextColor3=Settings.Text,
+    PlaceholderColor3=Settings.Muted,
+    PlaceholderText="Enter player name...",
+    Text="",
+    ClearTextOnFocus=false,
+    Font=Enum.Font.Gotham,
+    TextSize=12,
+    ZIndex=31
+})
+corner(promptInput,7); outline(promptInput)
+local promptRun=create("TextButton",promptPanel,{
+    Size=UDim2.new(0.5,-14,0,28),
+    Position=UDim2.new(0,10,1,-36),
+    BackgroundColor3=Color3.fromRGB(55,55,61),
+    Text="Run",
+    TextColor3=Settings.Text,
+    Font=Enum.Font.GothamBold,
+    TextSize=12,
+    ZIndex=31
+})
+corner(promptRun,7)
+local promptCancel=create("TextButton",promptPanel,{
+    Size=UDim2.new(0.5,-14,0,28),
+    Position=UDim2.new(0.5,4,1,-36),
+    BackgroundColor3=Settings.Tile,
+    Text="Cancel",
+    TextColor3=Settings.Muted,
+    Font=Enum.Font.GothamMedium,
+    TextSize=12,
+    ZIndex=31
+})
+corner(promptCancel,7)
+local pendingCommand=nil
+
+local function runCommand(name, suppliedArgument)
+    local arg=(suppliedArgument or ""):match("^%s*(.-)%s*$")
+    local defaults={speed="50",jump="100",headsize="2",size="2",title="ADMIN",vehiclespeed="100"}
+    if arg=="" then arg=defaults[name:lower()] or "" end
+    local fn=commands[name:lower()]
+    if fn then
+        local args={";"..name:lower(),"me"}
+        if arg~="" then table.insert(args,arg) end
+        local ok,err=pcall(function() fn(args) end)
+        if not ok then notify("Erro: "..tostring(err)) end
+    end
+end
+
+local function openCommandPrompt(name)
+    pendingCommand=name
+    promptTitle.Text=string.upper(name)
+    if name:lower()=="view" or name:lower()=="teleport" or name:lower()=="goto" then
+        promptInput.PlaceholderText="Player username or display name..."
+        promptInput.Text=""
+    elseif name:lower()=="vehiclespeed" then
+        promptInput.PlaceholderText="Vehicle speed (e.g. 100)"
+        promptInput.Text="100"
+    else
+        promptInput.PlaceholderText="Enter value..."
+        promptInput.Text=""
+    end
+    promptPanel.Visible=true
+    promptInput:CaptureFocus()
+end
+
+local function submitPrompt()
+    if not pendingCommand then return end
+    local value=promptInput.Text
+    if (pendingCommand:lower()=="view" or pendingCommand:lower()=="teleport" or pendingCommand:lower()=="goto") and value:match("^%s*$") then
+        notify("Digite o nome de um jogador")
+        return
+    end
+    local commandName=pendingCommand
+    pendingCommand=nil
+    promptPanel.Visible=false
+    runCommand(commandName,value)
+end
+promptRun.MouseButton1Click:Connect(submitPrompt)
+promptCancel.MouseButton1Click:Connect(function()
+    pendingCommand=nil
+    promptPanel.Visible=false
+end)
+promptInput.FocusLost:Connect(function(enterPressed)
+    if enterPressed and promptPanel.Visible then submitPrompt() end
+end)
+local function renderCommands(filter)
+    for _,b in ipairs(commandButtons) do b:Destroy() end
+    table.clear(commandButtons)
+    for _,name in ipairs(commandNames) do
+        if name:lower():find((filter or ""):lower(),1,true) then
+            local b=makeButton(commandsPage,"▶     "..name.."                         Run",35,4+#commandButtons)
+            b.TextXAlignment=Enum.TextXAlignment.Left
+            b.MouseButton1Click:Connect(function()
+                local lower=name:lower()
+                if lower=="view" or lower=="teleport" or lower=="goto" or lower=="vehiclespeed" or lower=="speed" or lower=="ws" or lower=="jumppower" or lower=="jp" or lower=="fov" then
+                    openCommandPrompt(name)
+                else
+                    runCommand(name)
+                end
+            end)
+            table.insert(commandButtons,b)
+        end
+    end
+end
+search:GetPropertyChangedSignal("Text"):Connect(function() renderCommands(search.Text) end)
+renderCommands("")
+
+-- ANALYTICS
+section(analyticsPage,"SESSION ANALYTICS",1)
+local analyticsText=label(analyticsPage,"Press refresh to view session details.",12,UDim2.new(),Settings.Text,false)
+analyticsText.Size=UDim2.new(1,-4,0,150)
+analyticsText.TextYAlignment=Enum.TextYAlignment.Top
+analyticsText.TextWrapped=true
+analyticsText.LayoutOrder=2
+action(analyticsPage,"↻   Refresh statistics",function()
+    local h=humanoid()
+    analyticsText.Text="Player: "..LP.Name..
+        "\nPlayers in server: "..#Players:GetPlayers()..
+        "\nCharacter: "..(character() and "Loaded" or "Not loaded")..
+        "\nHealth: "..(h and math.floor(h.Health).."/"..math.floor(h.MaxHealth) or "N/A")..
+        "\nWalkSpeed: "..(h and tostring(h.WalkSpeed) or "N/A")..
+        "\nJumpPower: "..(h and tostring(h.JumpPower) or "N/A")
+end,3)
+
+-- ROLES: player directory. Timer means time observed since this script started.
+section(rolesPage,"PLAYERS IN THIS SERVER",1)
+local roleSearch=create("TextBox",rolesPage,{
+    Size=UDim2.new(1,-4,0,34),
+    BackgroundColor3=Settings.Panel,
+    BackgroundTransparency=Settings.BackgroundTransparency,
+    TextColor3=Settings.Text,
+    PlaceholderColor3=Settings.Muted,
+    PlaceholderText="Search player...",
+    Text="",
+    ClearTextOnFocus=false,
+    Font=Enum.Font.Gotham,
+    TextSize=12,
+    LayoutOrder=2
+})
+corner(roleSearch,8); outline(roleSearch)
+local roleNote=label(rolesPage,"Time shown = time since this script first detected the player; it is not the player's exact server join time.",10,UDim2.new(),Settings.Muted)
+roleNote.Size=UDim2.new(1,-4,0,38)
+roleNote.TextWrapped=true
+roleNote.LayoutOrder=3
+local roleRows={}
+local function formatDuration(seconds)
+    seconds=math.max(0,math.floor(seconds))
+    local hours=math.floor(seconds/3600)
+    local minutes=math.floor((seconds%3600)/60)
+    local secs=seconds%60
+    return string.format("%02dh %02dm %02ds",hours,minutes,secs)
+end
+local function refreshRoles(filter)
+    for _,row in ipairs(roleRows) do row:Destroy() end
+    table.clear(roleRows)
+    local needle=(filter or ""):lower()
+    local players=Players:GetPlayers()
+    table.sort(players,function(a,b) return a.Name:lower()<b.Name:lower() end)
+    for _,plr in ipairs(players) do
+        if plr.Name:lower():find(needle,1,true) or plr.DisplayName:lower():find(needle,1,true) then
+            local elapsed=os.clock()-(observedAt[plr] or os.clock())
+            local row=makeButton(rolesPage,"👤  "..plr.DisplayName.."  @"..plr.Name.."\n      Observado: "..formatDuration(elapsed),48,4+#roleRows)
+            row.TextXAlignment=Enum.TextXAlignment.Left
+            row.TextSize=11
+            table.insert(roleRows,row)
+        end
+    end
+    if #roleRows==0 then
+        local empty=makeButton(rolesPage,"No players found",36,4)
+        empty.Active=false
+        table.insert(roleRows,empty)
+    end
+end
+roleSearch:GetPropertyChangedSignal("Text"):Connect(function() refreshRoles(roleSearch.Text) end)
+action(rolesPage,"↻   Refresh player list",function() refreshRoles(roleSearch.Text) end,4)
+refreshRoles("")
+task.spawn(function()
+    while GUI.Parent do
+        task.wait(30)
+        if rolesPage.Visible then refreshRoles(roleSearch.Text) end
+    end
+end)
+
+-- MODERATION: local-only controls
+section(moderationPage,"LOCAL CHARACTER",1)
+local moderationText=label(moderationPage,"These controls only affect your own client-side character. They cannot kick, ban, mute, or control other players.",12,UDim2.new(),Settings.Text)
+moderationText.Size=UDim2.new(1,-4,0,75)
+moderationText.TextWrapped=true
+moderationText.TextYAlignment=Enum.TextYAlignment.Top
+moderationText.LayoutOrder=2
+action(moderationPage,"Restore my character",restore,3)
+action(moderationPage,"Reset my character",function() if character() then character():BreakJoints() end end,4)
+
+-- TASKS
+section(tasksPage,"QUICK ACTIONS",1)
+action(tasksPage,"Heal character",heal,2)
+action(tasksPage,"Restore character",restore,3)
+action(tasksPage,"Toggle Fly",function() fly(60) end,4)
+action(tasksPage,"Toggle NoClip",noclip,5)
+action(tasksPage,"Toggle Infinite Jump",infiniteJump,6)
+action(tasksPage,"Apply Neon",function() applyMaterial(Enum.Material.Neon) end,7)
+action(tasksPage,"Apply Glass",function() applyMaterial(Enum.Material.Glass) end,8)
+action(tasksPage,"Vehicle Fly (while seated)",vehicleFly,9)
+action(tasksPage,"Equip owned Boombox",equipOwnedBoombox,10)
+action(tasksPage,"Stop spectating",unview,11)
+
+-- LOGS
+section(logsPage,"RECENT ACTIONS",1)
+local logsText=label(logsPage,"No actions recorded.",11,UDim2.new(),Settings.Text)
+logsText.Size=UDim2.new(1,-4,0,250)
+logsText.TextYAlignment=Enum.TextYAlignment.Top
+logsText.TextWrapped=true
+logsText.LayoutOrder=2
+action(logsPage,"Refresh logs",function() logsText.Text=#logs>0 and table.concat(logs,"\n\n") or "No actions recorded." end,3)
+action(logsPage,"Clear logs",function() table.clear(logs); logsText.Text="Logs cleared." end,4)
+
+-- SETTINGS / DECORATION
+section(settingsPage,"THEMES",1)
+local themeText=label(settingsPage,"Current theme: Dark",11,UDim2.new(),Settings.Muted)
+themeText.Size=UDim2.new(1,-4,0,22)
+themeText.LayoutOrder=2
+
+local open -- assigned below; keep the floating opener black across themes
+local function applyTheme(name)
+    local themes={
+        Dark={Color3.fromRGB(10,10,11),Color3.fromRGB(24,24,26),Color3.fromRGB(37,37,40),Color3.fromRGB(245,245,245)},
+        Midnight={Color3.fromRGB(7,13,24),Color3.fromRGB(17,27,44),Color3.fromRGB(28,43,65),Color3.fromRGB(105,170,255)},
+        Purple={Color3.fromRGB(17,10,24),Color3.fromRGB(34,20,46),Color3.fromRGB(53,32,69),Color3.fromRGB(195,135,255)},
+        Red={Color3.fromRGB(22,9,11),Color3.fromRGB(43,19,22),Color3.fromRGB(65,29,33),Color3.fromRGB(255,105,115)},
+        Green={Color3.fromRGB(8,18,14),Color3.fromRGB(18,37,28),Color3.fromRGB(30,57,43),Color3.fromRGB(100,220,155)}
+    }
+    local t=themes[name]
+    if not t then return end
+    Settings.Theme=name
+    Settings.Background,Settings.Panel,Settings.Tile,Settings.Accent=t[1],t[2],t[3],t[4]
+    main.BackgroundColor3=Settings.Background
+    for _,obj in ipairs(GUI:GetDescendants()) do
+        if obj:IsA("TextButton") and obj~=close and obj~=minimize and obj~=open then
+            obj.BackgroundColor3=Settings.Tile
+        elseif obj:IsA("TextBox") then
+            obj.BackgroundColor3=Settings.Panel
+        end
+        if obj:IsA("TextLabel") and obj.Text=="HD" then
+            obj.TextColor3=Color3.fromRGB(8,8,8)
+        end
+    end
+    themeText.Text="Current theme: "..name
+    notify(name.." theme applied")
+end
+
+action(settingsPage,"●   Dark",function() applyTheme("Dark") end,3)
+action(settingsPage,"●   Midnight Blue",function() applyTheme("Midnight") end,4)
+action(settingsPage,"●   Purple",function() applyTheme("Purple") end,5)
+action(settingsPage,"●   Red",function() applyTheme("Red") end,6)
+action(settingsPage,"●   Green",function() applyTheme("Green") end,7)
+section(settingsPage,"WINDOW OPTIONS",8)
+action(settingsPage,"◐   Toggle transparency",function()
+    Settings.BackgroundTransparency=(Settings.BackgroundTransparency==0 and 0.12 or 0)
+    main.BackgroundTransparency=Settings.BackgroundTransparency
+    for _,obj in ipairs(GUI:GetDescendants()) do
+        if (obj:IsA("TextButton") or obj:IsA("TextBox")) and obj.BackgroundTransparency<1 then
+            obj.BackgroundTransparency=Settings.BackgroundTransparency
+        end
+    end
+    notify("Transparency updated")
+end,9)
+action(settingsPage,"▢   Toggle rounded corners",function()
+    Settings.Rounded=not Settings.Rounded
+    for _,obj in ipairs(GUI:GetDescendants()) do
+        local c=obj:FindFirstChildOfClass("UICorner")
+        if c then c.CornerRadius=UDim.new(0,Settings.Rounded and 9 or 2) end
+    end
+    notify("Rounded corners updated")
+end,10)
+action(settingsPage,"＋   Increase UI size",function()
+    Settings.Scale=math.clamp(Settings.Scale+0.05,0.8,1.2)
+    main.Size=UDim2.fromOffset(320*Settings.Scale,480*Settings.Scale)
+    notify("UI scale: "..math.floor(Settings.Scale*100).."%")
+end,11)
+action(settingsPage,"－   Decrease UI size",function()
+    Settings.Scale=math.clamp(Settings.Scale-0.05,0.8,1.2)
+    main.Size=UDim2.fromOffset(320*Settings.Scale,480*Settings.Scale)
+    notify("UI scale: "..math.floor(Settings.Scale*100).."%")
+end,12)
+section(settingsPage,"INTERFACE & QUALITY OF LIFE",15)
+action(settingsPage,"Toggle animations",function()
+    Settings.Animations=not Settings.Animations
+    notify("Animations: "..(Settings.Animations and "ON" or "OFF"))
+end,16)
+action(settingsPage,"Toggle notifications",function()
+    Settings.Notifications=not Settings.Notifications
+    if Settings.Notifications then notify("Notifications enabled") end
+end,17)
+action(settingsPage,"Toggle compact home cards",function()
+    Settings.CompactMode=not Settings.CompactMode
+    grid.CellSize=UDim2.new(0.5,-4,0,Settings.CompactMode and 78 or 98)
+    tileHolder.Size=UDim2.new(1,0,0,Settings.CompactMode and 330 or 410)
+    notify("Compact cards: "..(Settings.CompactMode and "ON" or "OFF"))
+end,18)
+action(settingsPage,"Change toggle key (RightControl / F4)",function()
+    Settings.ToggleKey=(Settings.ToggleKey==Enum.KeyCode.RightControl and Enum.KeyCode.F4 or Enum.KeyCode.RightControl)
+    notify("Menu key: "..Settings.ToggleKey.Name)
+end,19)
+action(settingsPage,"Reset window position",function()
+    main.Position=UDim2.new(0.5,-main.Size.X.Offset/2,0.5,-main.Size.Y.Offset/2)
+    notify("Window position reset")
+end,20)
+action(settingsPage,"Reset FOV to 70",function() setFOV(70) end,21)
+action(settingsPage,"Restore original lighting",function() setFullbright(false) end,22)
+action(settingsPage,"Disable local ESP / XRay",function() setESP(false); setXray(false) end,23)
+action(settingsPage,"↔   Center window",function()
+    main.Position=UDim2.new(0.5,-main.Size.X.Offset/2,0.5,-main.Size.Y.Offset/2)
+    notify("Window centered")
+end,13)
+action(settingsPage,"↺   Reset appearance",function()
+    Settings.BackgroundTransparency=0
+    Settings.Rounded=true
+    Settings.Scale=1
+    applyTheme("Dark")
+    main.Size=UDim2.fromOffset(320,480)
+    main.BackgroundTransparency=0
+    notify("Appearance reset")
+end,14)
+
+-- INFO
+section(infoPage,"HD ADMIN • VOLTEX STUDIOS",1)
+local about=label(infoPage,"Version 2.5.0\n\nInterface based on the supplied HD Admin menu reference.\n\nRightControl: show / hide\nDrag the top bar: move window\n− : minimize\n× : hide window\n\nChat commands begin with ; and target 'me'.",12,UDim2.new(),Settings.Text)
+about.Size=UDim2.new(1,-4,0,210)
+about.TextWrapped=true
+about.TextYAlignment=Enum.TextYAlignment.Top
+about.LayoutOrder=2
+
+-- MINIMIZE / CLOSE
+local minimized=false
+local fullSize=UDim2.fromOffset(320,480)
+minimize.MouseButton1Click:Connect(function()
+    minimized=not minimized
+    content.Visible=not minimized
+    main.Size=minimized and UDim2.fromOffset(320,64) or fullSize
+    minimize.Text=minimized and "+" or "−"
+end)
+close.MouseButton1Click:Connect(function() main.Visible=false end)
+
+-- Black circular floating opener
+open=create("TextButton",GUI,{
+    Name="OpenButton",
+    Size=UDim2.fromOffset(44,44),
+    -- Top-left, positioned beside the Roblox chat/topbar area.
+    Position=UDim2.new(0,132,0,8),
+    BackgroundColor3=Color3.fromRGB(0,0,0),
+    Text="HD",
+    TextColor3=Color3.fromRGB(255,255,255),
+    TextSize=14,
+    Font=Enum.Font.GothamBlack,
+    AutoButtonColor=false
+})
+create("UICorner",open,{CornerRadius=UDim.new(1,0)})
+outline(open,Color3.fromRGB(90,90,95))
+open.MouseEnter:Connect(function() tween(open,{BackgroundColor3=Color3.fromRGB(35,35,38)},0.12) end)
+open.MouseLeave:Connect(function() tween(open,{BackgroundColor3=Color3.fromRGB(0,0,0)},0.12) end)
+
+local function showWindow()
+    main.Visible=not main.Visible
+    if main.Visible and minimized then
+        minimized=false
+        content.Visible=true
+        main.Size=fullSize
+        minimize.Text="−"
+    end
+end
+open.MouseButton1Click:Connect(showWindow)
+
+UIS.InputBegan:Connect(function(input,processed)
+    if not processed and input.KeyCode==Settings.ToggleKey then
+        showWindow()
+    end
+end)
+
+showPage("Home")
+notify("HD Admin v2.5.0 carregado")
+print("HD Admin v2.5.0 by Voltex Studios loaded")
